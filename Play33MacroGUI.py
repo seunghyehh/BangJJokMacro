@@ -23,7 +23,7 @@ from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentE
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ─────────────────────────────────────────
-VERSION = "1.0.3"
+VERSION = "1.1.0"
 GITHUB_REPO = "seunghyehh/BangJJokMacro"
 # ─────────────────────────────────────────
 
@@ -304,31 +304,37 @@ def fill_reservation_form(driver, config, log=print):
         log("  [!] 제출 버튼을 찾지 못했습니다. 수동으로 확인해주세요.")
 
 
-def run_macro(config, log=print, stop_event=None):
+def run_macro(config, log=print, stop_event=None, label=""):
+    def _log(msg):
+        if label:
+            log(f"[{label}] {msg}")
+        else:
+            log(msg)
+
     t_start = time.perf_counter()
     driver = None
     try:
-        log("브라우저 시작 중...")
+        _log("브라우저 시작 중...")
         driver = build_driver()
-        log(f"브라우저 초기화: {time.perf_counter() - t_start:.2f}s")
+        _log(f"브라우저 초기화: {time.perf_counter() - t_start:.2f}s")
     except Exception as e:
-        log(f"브라우저 시작 실패: {e}")
+        _log(f"브라우저 시작 실패: {e}")
         return
 
     url = build_url(config)
     retries = 0
 
     try:
-        log("=" * 40)
-        log(f"branch={config['branch']} | theme={config['theme']}")
-        log(f"날짜: {config['date']} | 희망시간: {config['preferred_times']}")
-        log("=" * 40)
+        _log("=" * 40)
+        _log(f"branch={config['branch']} | theme={config['theme']}")
+        _log(f"날짜: {config['date']} | 희망시간: {config['preferred_times']}")
+        _log("=" * 40)
 
-        wait_until_open(config.get("open_time"), driver, url, log=log, stop_event=stop_event)
+        wait_until_open(config.get("open_time"), driver, url, log=_log, stop_event=stop_event)
 
         while True:
             if stop_event and stop_event.is_set():
-                log("중지되었습니다.")
+                _log("중지되었습니다.")
                 break
 
             t_load = time.perf_counter()
@@ -338,47 +344,47 @@ def run_macro(config, log=print, stop_event=None):
                 driver.switch_to.alert.accept()
             except Exception:
                 pass
-            log(f"페이지 로드: {time.perf_counter() - t_load:.2f}s")
+            _log(f"페이지 로드: {time.perf_counter() - t_load:.2f}s")
 
             try:
                 t_find = time.perf_counter()
                 time_str, slot_elem = find_available_time(driver, config["preferred_times"])
-                log(f"슬롯 탐색: {time.perf_counter() - t_find:.2f}s")
+                _log(f"슬롯 탐색: {time.perf_counter() - t_find:.2f}s")
             except (UnexpectedAlertPresentException, TimeoutException):
                 try:
                     driver.switch_to.alert.accept()
                 except Exception:
                     pass
                 time_str, slot_elem = None, None
-                log("슬롯 탐색: 슬롯 없음")
+                _log("슬롯 탐색: 슬롯 없음")
             except InvalidSessionIdException:
-                log("브라우저가 닫혔습니다.")
+                _log("브라우저가 닫혔습니다.")
                 return
 
             if time_str:
-                log(f"[1] '{time_str}' 예약 가능! 클릭합니다.")
+                _log(f"[1] '{time_str}' 예약 가능! 클릭합니다.")
                 slot_elem.click()
                 WebDriverWait(driver, 5, poll_frequency=0.1).until(
                     EC.presence_of_element_located((By.NAME, "name"))
                 )
                 t_form = time.perf_counter()
-                fill_reservation_form(driver, config, log=log)
-                log(f"폼 입력+제출: {time.perf_counter() - t_form:.2f}s")
-                log(f"총 소요시간: {time.perf_counter() - t_start:.2f}s")
+                fill_reservation_form(driver, config, log=_log)
+                _log(f"폼 입력+제출: {time.perf_counter() - t_form:.2f}s")
+                _log(f"총 소요시간: {time.perf_counter() - t_start:.2f}s")
                 break
             else:
                 retries += 1
                 max_r = config["max_retries"]
                 if max_r > 0 and retries >= max_r:
-                    log(f"최대 재시도 {max_r}회 도달. 종료합니다.")
+                    _log(f"최대 재시도 {max_r}회 도달. 종료합니다.")
                     break
-                log(f"[재시도 {retries}] 즉시 재시도...")
+                _log(f"[재시도 {retries}] 즉시 재시도...")
 
     except Exception as e:
-        log(f"오류 발생: {e}")
+        _log(f"오류 발생: {e}")
     finally:
         if config.get("test_mode"):
-            log("테스트 완료. 브라우저를 확인 후 직접 닫아주세요.")
+            _log("테스트 완료. 브라우저를 확인 후 직접 닫아주세요.")
         else:
             try:
                 driver.quit()
@@ -394,7 +400,9 @@ class MacroApp:
         self.root.title(f"플레이33 예약 매크로  v{VERSION}")
         self.root.resizable(False, False)
         self.stop_event = None
-        self.thread = None
+        self.threads = []  # 멀티 스레드 지원
+        self.threads_done = 0
+        self.reservation_slots = []  # [{theme_name, theme_val, times: [...]}, ...]
         self._build_ui()
         threading.Thread(target=self._check_update_bg, daemon=True).start()
         threading.Thread(target=self._fetch_branches_bg, daemon=True).start()
@@ -425,50 +433,43 @@ class MacroApp:
 
         self.branch_map = {}  # {표시이름: value}
         self.theme_map = {}   # {표시이름: value}
+        self.theme_times = {}  # {테마이름: [시간들]}
 
         ttk.Label(url_frame, text="지점").grid(row=0, column=0, **p, sticky="e")
         self.branch_combo = ttk.Combobox(url_frame, width=14, state="readonly")
         self.branch_combo.grid(row=0, column=1, **p)
         self.branch_combo.bind("<<ComboboxSelected>>", self._on_branch_change)
 
-        ttk.Label(url_frame, text="테마").grid(row=0, column=2, **p, sticky="e")
-        self.theme_combo = ttk.Combobox(url_frame, width=18, state="readonly")
-        self.theme_combo.grid(row=0, column=3, **p)
-
-        self.theme_combo.bind("<<ComboboxSelected>>", self._on_theme_change)
-
-        ttk.Label(url_frame, text="날짜").grid(row=1, column=0, **p, sticky="e")
+        ttk.Label(url_frame, text="날짜").grid(row=0, column=2, **p, sticky="e")
         self.date = ttk.Entry(url_frame, width=16)
-        self.date.insert(0, "2026-05-25")
-        self.date.grid(row=1, column=1, columnspan=3, **p, sticky="w")
-        self.date.bind("<FocusOut>", lambda e: self._load_times())
-        self.date.bind("<Return>", lambda e: self._load_times())
+        self.date.insert(0, "2026-07-18")
+        self.date.grid(row=0, column=3, **p, sticky="w")
 
-        # 희망 시간 선택 (두 리스트박스)
-        times_frame = ttk.Frame(url_frame)
-        times_frame.grid(row=2, column=0, columnspan=5, padx=8, pady=4, sticky="ew")
+        # 예약 목록 (Treeview)
+        slots_frame = ttk.LabelFrame(self.root, text=" 예약 목록 ")
+        slots_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
 
-        ttk.Label(times_frame, text="전체 시간", foreground="gray").grid(row=0, column=0)
-        ttk.Label(times_frame, text="희망 시간 (우선순위↑)", foreground="gray").grid(row=0, column=2)
+        tree_frame = ttk.Frame(slots_frame)
+        tree_frame.pack(padx=8, pady=4, fill="x")
 
-        self.all_times_lb = tk.Listbox(times_frame, height=5, width=11, selectmode=tk.SINGLE, exportselection=False)
-        self.all_times_lb.grid(row=1, column=0, padx=4)
+        self.slots_tree = ttk.Treeview(tree_frame, columns=("theme", "times"), show="headings", height=4)
+        self.slots_tree.heading("theme", text="테마")
+        self.slots_tree.heading("times", text="희망 시간")
+        self.slots_tree.column("theme", width=150)
+        self.slots_tree.column("times", width=200)
+        self.slots_tree.pack(side="left", fill="x", expand=True)
 
-        mid_frame = ttk.Frame(times_frame)
-        mid_frame.grid(row=1, column=1, padx=4)
-        ttk.Button(mid_frame, text=">>", command=self._time_add, width=4).pack(pady=2)
-        ttk.Button(mid_frame, text="<<", command=self._time_remove, width=4).pack(pady=2)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.slots_tree.yview)
+        tree_scroll.pack(side="right", fill="y")
+        self.slots_tree.configure(yscrollcommand=tree_scroll.set)
 
-        self.prio_times_lb = tk.Listbox(times_frame, height=5, width=11, selectmode=tk.SINGLE, exportselection=False)
-        self.prio_times_lb.grid(row=1, column=2, padx=4)
-
-        right_frame = ttk.Frame(times_frame)
-        right_frame.grid(row=1, column=3, padx=4)
-        ttk.Button(right_frame, text="↑", command=self._time_up, width=3).pack(pady=2)
-        ttk.Button(right_frame, text="↓", command=self._time_down, width=3).pack(pady=2)
+        btn_frame_slots = ttk.Frame(slots_frame)
+        btn_frame_slots.pack(pady=4)
+        ttk.Button(btn_frame_slots, text="+ 예약 추가", command=self._show_add_dialog, width=14).pack(side="left", padx=4)
+        ttk.Button(btn_frame_slots, text="- 선택 삭제", command=self._remove_reservation, width=14).pack(side="left", padx=4)
 
         info_frame = ttk.LabelFrame(self.root, text=" 예약자 정보 ")
-        info_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+        info_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
 
         ttk.Label(info_frame, text="이름").grid(row=0, column=0, **p, sticky="e")
         self.name = ttk.Entry(info_frame, width=14)
@@ -486,11 +487,11 @@ class MacroApp:
         self.phone.grid(row=1, column=1, columnspan=3, **p, sticky="w")
 
         cfg_frame = ttk.LabelFrame(self.root, text=" 설정 ")
-        cfg_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
+        cfg_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
 
         ttk.Label(cfg_frame, text="오픈 시각").grid(row=0, column=0, **p, sticky="e")
         self.open_time = ttk.Entry(cfg_frame, width=12)
-        self.open_time.insert(0, "10:00:00")
+        self.open_time.insert(0, "20:00:00")
         self.open_time.grid(row=0, column=1, **p)
 
         self.use_open_time = tk.BooleanVar(value=True)
@@ -502,7 +503,7 @@ class MacroApp:
             row=1, column=0, columnspan=3, **p, sticky="w")
 
         btn_frame = ttk.Frame(self.root)
-        btn_frame.grid(row=3, column=0, pady=8)
+        btn_frame.grid(row=4, column=0, pady=8)
 
         self.run_btn = ttk.Button(btn_frame, text="▶  실행", command=self.start, width=16)
         self.run_btn.grid(row=0, column=0, padx=8)
@@ -511,7 +512,7 @@ class MacroApp:
         self.stop_btn.grid(row=0, column=1, padx=8)
 
         log_frame = ttk.LabelFrame(self.root, text=" 로그 ")
-        log_frame.grid(row=4, column=0, sticky="nsew", padx=12, pady=(4, 12))
+        log_frame.grid(row=5, column=0, sticky="nsew", padx=12, pady=(4, 12))
 
         self.log_box = scrolledtext.ScrolledText(
             log_frame, width=58, height=13, state="disabled",
@@ -548,103 +549,171 @@ class MacroApp:
         name = self.branch_combo.get()
         val = self.branch_map.get(name)
         if val:
-            self.theme_combo.set("")
-            self.theme_combo["values"] = []
-            self.all_times_lb.delete(0, tk.END)
+            self.theme_map = {}
             threading.Thread(target=self._fetch_themes_bg, args=(val,), daemon=True).start()
-
-    def _on_theme_change(self, event=None):
-        self._load_times()
 
     def _fetch_themes_bg(self, branch_val):
         try:
             options = fetch_themes(branch_val)
             self.theme_map = {text: val for val, text in options}
-            names = list(self.theme_map.keys())
-            self.root.after(0, lambda: self._update_theme_combo(names))
+            self.theme_times = {}
+            self.root.after(0, lambda: self.log(f"테마 {len(self.theme_map)}개 로드 완료. 시간 로딩 중..."))
+
+            # 오늘 날짜로 각 테마별 시간 병렬 로딩
+            today = datetime.date.today().isoformat()
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def fetch_one(theme_name, theme_val):
+                try:
+                    times = fetch_time_slots(branch_val, theme_val, today)
+                    return theme_name, times
+                except Exception:
+                    return theme_name, []
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(fetch_one, name, val): name
+                    for name, val in self.theme_map.items()
+                }
+                for future in as_completed(futures):
+                    theme_name, times = future.result()
+                    self.theme_times[theme_name] = times
+                    self.root.after(0, lambda n=theme_name, t=times: self.log(f"  [{n}] 시간 {len(t)}개"))
+
+            self.root.after(0, lambda: self.log("모든 테마 시간 로드 완료"))
         except Exception as e:
             self.root.after(0, lambda: self.log(f"테마 불러오기 실패: {e}"))
 
-    def _update_theme_combo(self, names):
-        self.theme_combo["values"] = names
-        if names:
-            self.theme_combo.set(names[0])
-            self._load_times()
-
-    def _load_times(self):
-        branch_val = self.branch_map.get(self.branch_combo.get())
-        theme_val = self.theme_map.get(self.theme_combo.get())
-        date_val = self.date.get().strip()
-        if not branch_val or not theme_val or not date_val:
+    def _show_add_dialog(self):
+        """예약 추가 다이얼로그 표시"""
+        if not self.theme_map:
+            messagebox.showwarning("알림", "지점을 먼저 선택하고 테마가 로드될 때까지 기다려주세요.")
             return
-        threading.Thread(target=self._fetch_times_bg, args=(branch_val, theme_val, date_val), daemon=True).start()
-
-    def _fetch_times_bg(self, branch_val, theme_val, date_val):
-        try:
-            times = fetch_time_slots(branch_val, theme_val, date_val)
-            self.root.after(0, lambda: self._update_all_times(times))
-        except Exception as e:
-            self.root.after(0, lambda: self.log(f"시간 불러오기 실패: {e}"))
-
-    def _update_all_times(self, times):
-        self.all_times_lb.delete(0, tk.END)
-        self.prio_times_lb.delete(0, tk.END)
-        for t in times:
-            self.all_times_lb.insert(tk.END, t)
-
-    def _time_add(self):
-        sel = self.all_times_lb.curselection()
-        if not sel:
+        if not self.theme_times:
+            messagebox.showwarning("알림", "시간 로딩 중입니다. 잠시 후 다시 시도해주세요.")
             return
-        t = self.all_times_lb.get(sel[0])
-        if t not in self.prio_times_lb.get(0, tk.END):
-            self.prio_times_lb.insert(tk.END, t)
 
-    def _time_remove(self):
-        sel = self.prio_times_lb.curselection()
-        if sel:
-            self.prio_times_lb.delete(sel[0])
+        dialog = tk.Toplevel(self.root)
+        dialog.title("예약 추가")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
 
-    def _time_up(self):
-        sel = self.prio_times_lb.curselection()
-        if not sel or sel[0] == 0:
+        p = {"padx": 8, "pady": 5}
+
+        # 테마 선택
+        ttk.Label(dialog, text="테마").grid(row=0, column=0, **p, sticky="e")
+        theme_combo = ttk.Combobox(dialog, values=list(self.theme_map.keys()), width=20, state="readonly")
+        theme_combo.grid(row=0, column=1, **p)
+        if self.theme_map:
+            theme_combo.set(list(self.theme_map.keys())[0])
+
+        # 시간 리스트
+        times_frame = ttk.Frame(dialog)
+        times_frame.grid(row=1, column=0, columnspan=2, padx=8, pady=4)
+
+        ttk.Label(times_frame, text="전체 시간", foreground="gray").grid(row=0, column=0)
+        ttk.Label(times_frame, text="선택한 시간", foreground="gray").grid(row=0, column=2)
+
+        all_times_lb = tk.Listbox(times_frame, height=6, width=11, selectmode=tk.SINGLE, exportselection=False)
+        all_times_lb.grid(row=1, column=0, padx=4)
+
+        mid_frame = ttk.Frame(times_frame)
+        mid_frame.grid(row=1, column=1, padx=4)
+
+        selected_times_lb = tk.Listbox(times_frame, height=6, width=11, selectmode=tk.SINGLE, exportselection=False)
+        selected_times_lb.grid(row=1, column=2, padx=4)
+
+        def update_times():
+            """캐시된 시간으로 리스트 업데이트"""
+            theme_name = theme_combo.get()
+            times = self.theme_times.get(theme_name, [])
+            all_times_lb.delete(0, tk.END)
+            for t in times:
+                all_times_lb.insert(tk.END, t)
+
+        def add_time():
+            sel = all_times_lb.curselection()
+            if sel:
+                t = all_times_lb.get(sel[0])
+                if t not in selected_times_lb.get(0, tk.END):
+                    selected_times_lb.insert(tk.END, t)
+
+        def remove_time():
+            sel = selected_times_lb.curselection()
+            if sel:
+                selected_times_lb.delete(sel[0])
+
+        ttk.Button(mid_frame, text=">>", command=add_time, width=4).pack(pady=2)
+        ttk.Button(mid_frame, text="<<", command=remove_time, width=4).pack(pady=2)
+
+        # 확인/취소 버튼
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=8)
+
+        def on_ok():
+            theme_name = theme_combo.get()
+            theme_val = self.theme_map.get(theme_name)
+            times = list(selected_times_lb.get(0, tk.END))
+            if not theme_val:
+                messagebox.showwarning("알림", "테마를 선택해주세요.")
+                return
+            if not times:
+                messagebox.showwarning("알림", "희망 시간을 하나 이상 선택해주세요.")
+                return
+
+            # 예약 슬롯 추가
+            self.reservation_slots.append({
+                "theme_name": theme_name,
+                "theme_val": theme_val,
+                "times": times
+            })
+            self._refresh_slots_tree()
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="추가", command=on_ok, width=10).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="취소", command=dialog.destroy, width=10).pack(side="left", padx=4)
+
+        # 테마 변경 시 시간 업데이트
+        theme_combo.bind("<<ComboboxSelected>>", lambda e: update_times())
+        update_times()
+
+    def _refresh_slots_tree(self):
+        """Treeview 새로고침"""
+        for item in self.slots_tree.get_children():
+            self.slots_tree.delete(item)
+        for slot in self.reservation_slots:
+            times_str = ", ".join(slot["times"])
+            self.slots_tree.insert("", "end", values=(slot["theme_name"], times_str))
+
+    def _remove_reservation(self):
+        """선택한 예약 슬롯 삭제"""
+        selected = self.slots_tree.selection()
+        if not selected:
+            messagebox.showwarning("알림", "삭제할 예약을 선택해주세요.")
             return
-        i = sel[0]
-        t = self.prio_times_lb.get(i)
-        self.prio_times_lb.delete(i)
-        self.prio_times_lb.insert(i - 1, t)
-        self.prio_times_lb.selection_set(i - 1)
-
-    def _time_down(self):
-        sel = self.prio_times_lb.curselection()
-        if not sel or sel[0] == self.prio_times_lb.size() - 1:
-            return
-        i = sel[0]
-        t = self.prio_times_lb.get(i)
-        self.prio_times_lb.delete(i)
-        self.prio_times_lb.insert(i + 1, t)
-        self.prio_times_lb.selection_set(i + 1)
+        idx = self.slots_tree.index(selected[0])
+        del self.reservation_slots[idx]
+        self._refresh_slots_tree()
 
     def start(self):
         try:
-            times_raw = list(self.prio_times_lb.get(0, tk.END))
-            if not times_raw:
-                raise ValueError("희망 시간을 선택해주세요.\n(🔄 시간 불러오기 → >> 버튼으로 추가)")
+            if not self.reservation_slots:
+                raise ValueError("예약 목록이 비어있습니다.\n[+ 예약 추가] 버튼으로 테마와 시간을 추가해주세요.")
             branch_val = self.branch_map.get(self.branch_combo.get())
-            theme_val = self.theme_map.get(self.theme_combo.get())
-            if not branch_val or not theme_val:
-                raise ValueError("지점과 테마를 선택해주세요. (🔄 불러오기 버튼을 먼저 눌러주세요)")
-            config = {
-                "branch":          int(branch_val),
-                "theme":           int(theme_val),
-                "date":            self.date.get().strip(),
-                "preferred_times": times_raw,
-                "name":            self.name.get().strip(),
-                "phone":           self.phone.get().strip(),
-                "headcount":       self.headcount.get(),
-                "max_retries":     0,
-                "open_time":       self.open_time.get().strip() if self.use_open_time.get() else None,
-                "test_mode":       self.test_mode.get(),
+            if not branch_val:
+                raise ValueError("지점을 선택해주세요.")
+
+            # 공통 설정
+            common = {
+                "branch":      int(branch_val),
+                "date":        self.date.get().strip(),
+                "name":        self.name.get().strip(),
+                "phone":       self.phone.get().strip(),
+                "headcount":   self.headcount.get(),
+                "max_retries": 0,
+                "open_time":   self.open_time.get().strip() if self.use_open_time.get() else None,
+                "test_mode":   self.test_mode.get(),
             }
         except ValueError as e:
             messagebox.showerror("입력 오류", str(e))
@@ -658,21 +727,42 @@ class MacroApp:
         self.run_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
 
-        self.thread = threading.Thread(target=self._worker, args=(config,), daemon=True)
-        self.thread.start()
+        # 각 예약 슬롯별로 스레드 생성
+        self.threads = []
+        self.threads_done = 0
+        for slot in self.reservation_slots:
+            config = {
+                **common,
+                "theme": int(slot["theme_val"]),
+                "preferred_times": slot["times"],
+            }
+            label = slot["theme_name"]
+            t = threading.Thread(target=self._worker, args=(config, label), daemon=True)
+            self.threads.append(t)
 
-    def _worker(self, config):
+        self.log(f"총 {len(self.threads)}개 예약 매크로 시작")
+
+        # 모든 스레드 동시 시작
+        for t in self.threads:
+            t.start()
+
+    def _worker(self, config, label=""):
         try:
-            run_macro(config, log=self.log, stop_event=self.stop_event)
+            run_macro(config, log=self.log, stop_event=self.stop_event, label=label)
         except Exception as e:
-            self.log(f"오류 발생: {e}")
+            self.log(f"[{label}] 오류 발생: {e}" if label else f"오류 발생: {e}")
         finally:
-            self.root.after(0, self._on_done)
+            self.root.after(0, self._on_thread_done)
+
+    def _on_thread_done(self):
+        self.threads_done += 1
+        if self.threads_done >= len(self.threads):
+            self._on_done()
 
     def _on_done(self):
         self.run_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
-        self.log("--- 종료 ---")
+        self.log("=== 모든 매크로 종료 ===")
 
     def stop(self):
         if self.stop_event:
